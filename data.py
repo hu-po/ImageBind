@@ -23,8 +23,7 @@ from torchvision.transforms._transforms_video import NormalizeVideo
 
 DEFAULT_AUDIO_FRAME_SHIFT_MS = 10  # in milliseconds
 
-BPE_PATH = "bpe/bpe_simple_vocab_16e6.txt.gz"
-
+BPE_PATH = "/home/oop/dev/ImageBind/bpe/bpe_simple_vocab_16e6.txt.gz"
 
 def waveform2melspec(waveform, sample_rate, num_mel_bins, target_length):
     # Based on https://github.com/YuanGongND/ast/blob/d7d8b4b8e06cdaeb6c843cdb38794c1c7692234c/src/dataloader.py#L102
@@ -102,6 +101,23 @@ def load_and_transform_vision_data(image_paths, device):
         image_ouputs.append(image)
     return torch.stack(image_ouputs, dim=0)
 
+def load_and_transform_gradio_image(image, device):
+    image = Image.fromarray(image.astype("uint8"), "RGB")
+    data_transform = transforms.Compose(
+        [
+            transforms.Resize(
+                224, interpolation=transforms.InterpolationMode.BICUBIC
+            ),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=(0.48145466, 0.4578275, 0.40821073),
+                std=(0.26862954, 0.26130258, 0.27577711),
+            ),
+        ]
+    )
+    image = data_transform(image).to(device)
+    return image.unsqueeze(0)
 
 def load_and_transform_text(text, device):
     if text is None:
@@ -161,6 +177,51 @@ def load_and_transform_audio_data(
 
     return torch.stack(audio_outputs, dim=0)
 
+def load_and_transform_gradio_audio(
+    sr,
+    waveform,
+    device,
+    num_mel_bins=128,
+    target_length=204,
+    sample_rate=16000,
+    clip_duration=2,
+    clips_per_video=3,
+    mean=-4.268,
+    std=9.138,
+):
+    waveform = torch.from_numpy(waveform).view(1, -1)
+    # Convert to float
+    waveform = waveform.float()
+    # Normalize waveform
+    waveform = waveform / (torch.max(torch.abs(waveform)) + 1e-5)
+    clip_sampler = ConstantClipsPerVideoSampler(
+        clip_duration=clip_duration, clips_per_video=clips_per_video
+    )
+    if sample_rate != sr:
+        waveform = torchaudio.functional.resample(
+            waveform, orig_freq=sr, new_freq=sample_rate
+        )
+    all_clips_timepoints = get_clip_timepoints(
+        clip_sampler, waveform.size(1) / sample_rate
+    )
+    all_clips = []
+    for clip_timepoints in all_clips_timepoints:
+        waveform_clip = waveform[
+            :,
+            int(clip_timepoints[0] * sample_rate) : int(
+                clip_timepoints[1] * sample_rate
+            ),
+        ]
+        waveform_melspec = waveform2melspec(
+            waveform_clip, sample_rate, num_mel_bins, target_length
+        )
+        all_clips.append(waveform_melspec)
+
+    normalize = transforms.Normalize(mean=mean, std=std)
+    all_clips = [normalize(ac).to(device) for ac in all_clips]
+
+    all_clips = torch.stack(all_clips, dim=0)
+    return all_clips.unsqueeze(0)
 
 def get_clip_timepoints(clip_sampler, duration):
     # Read out all clips in this video
